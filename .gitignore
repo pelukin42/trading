@@ -1,0 +1,18 @@
+# Credenciales
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+build/
+dist/
+
+# Los backtests se regeneran; el paper trading (runs/<name>/) sí conviene guardarlo
+runs/*/backtest/
+
+# Reportes que guarda TradingAgents
+results/

@@ -1,0 +1,31 @@
+# Estrategia clásica de ejemplo (sin IA): cruce de medias móviles.
+# Sirve para probar el entorno y como punto de comparación para los agentes.
+
+name = "sma-ejemplo"
+symbols = ["AAPL", "MSFT", "NVDA"]
+benchmark = "SPY"
+rebalance = "weekly"        # daily | weekly | monthly
+risk_free_rate = 0.0        # tasa libre de riesgo anual para el Sharpe (p. ej. 0.04)
+
+[strategy]
+type = "sma_crossover"
+fast = 50
+slow = 200
+
+[broker]
+type = "sim"                # sim = broker simulado local, sin cuenta
+starting_cash = 10000
+commission_per_order = 0.0  # comisión fija por orden, en dólares
+commission_bps = 0.0        # comisión proporcional (1 bps = 0.01%)
+slippage_bps = 5            # costo de ejecución estimado por orden
+fractional = false          # true = permite fracciones de acción
+
+[data]
+source = "yfinance"         # yfinance | alpaca | csv
+lookback_days = 400         # días calendario de historial que recibe la estrategia
+
+[risk]
+max_weight = 0.5            # máximo 50% del capital en un solo ticker
+cash_buffer = 0.005         # siempre deja 0.5% en efectivo para costos
+rebalance_band = 0.02       # ignora ajustes menores a 2 puntos de peso
+max_drawdown_stop = 0.0     # 0 = sin kill switch

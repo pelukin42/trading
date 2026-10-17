@@ -1,0 +1,18 @@
+# Grupo de control: comprar SPY y no hacer nada más.
+# Cualquier agente que no le gane a esto después de costos no vale la pena.
+
+name = "benchmark-spy"
+symbols = ["SPY"]
+benchmark = "SPY"
+rebalance = "monthly"
+
+[strategy]
+type = "buy_and_hold"
+
+[broker]
+type = "sim"
+starting_cash = 10000
+slippage_bps = 5
+
+[data]
+source = "yfinance"

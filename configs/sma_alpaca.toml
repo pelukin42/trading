@@ -1,0 +1,29 @@
+# Igual que sma_ejemplo.toml, pero enviando órdenes a tu cuenta PAPER de Alpaca.
+# Requiere ALPACA_API_KEY y ALPACA_SECRET_KEY en .env (llaves de la cuenta paper).
+# Recomendación: usa una cuenta paper dedicada a este experimento, porque el agente
+# administra TODA la cuenta y vende lo que no esté en `symbols`.
+
+name = "sma-alpaca"
+symbols = ["AAPL", "MSFT", "NVDA"]
+benchmark = "SPY"
+rebalance = "weekly"
+
+[strategy]
+type = "sma_crossover"
+fast = 50
+slow = 200
+
+[broker]
+type = "alpaca"
+fractional = false
+
+[data]
+source = "alpaca"
+feed = "iex"                # las cuentas solo-paper tienen derecho a datos IEX
+lookback_days = 400
+
+[risk]
+max_weight = 0.5
+cash_buffer = 0.01
+rebalance_band = 0.02
+max_drawdown_stop = 0.25    # si cae 25% desde el máximo, liquida todo y se detiene

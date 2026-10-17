@@ -1,0 +1,39 @@
+# Agente LLM multi-agente de TauricResearch/TradingAgents.
+# Instalación y llaves: ver README, sección "Probar TradingAgents".
+#
+# OJO: no hagas backtest de esta estrategia (el LLM "conoce el futuro").
+# Evalúala solo hacia adelante con `papertrade run` durante varios meses.
+
+name = "tradingagents"
+symbols = ["NVDA", "AAPL"]
+benchmark = "SPY"
+rebalance = "weekly"        # cada decisión llama al LLM muchas veces por ticker: semanal limita el gasto
+
+[strategy]
+type = "tradingagents"
+# Estimación de lo que cuesta analizar UN ticker una vez (revisa la factura de tu proveedor
+# después de las primeras corridas y ajusta este número). Se descuenta en el reporte.
+cost_per_call_usd = 0.50
+debug = false
+
+# Cualquier clave de DEFAULT_CONFIG de TradingAgents. Si no pones nada, usa sus valores por defecto.
+[strategy.config]
+# llm_provider = "anthropic"
+# deep_think_llm = "<modelo para razonamiento profundo>"
+# quick_think_llm = "<modelo para tareas rápidas>"
+# max_debate_rounds = 1
+
+[broker]
+type = "sim"                # cambia a "alpaca" (y data.source = "alpaca") para usar tu cuenta paper
+starting_cash = 10000
+slippage_bps = 5
+
+[data]
+source = "yfinance"
+lookback_days = 400
+
+[risk]
+max_weight = 0.5
+cash_buffer = 0.01
+rebalance_band = 0.02
+max_drawdown_stop = 0.20
