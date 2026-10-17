@@ -97,6 +97,13 @@ class AlpacaBroker:
     def get_open_orders(self) -> list[Order]:
         return [self._parse_order(o) for o in self._raw_open_orders() if o["type"] not in _PROTECTIVE_TYPES]
 
+    def snapshot(self) -> tuple[Account, dict[str, Position], list[Order]]:
+        # Not atomic over REST. Open orders first: an entry that fills mid-read is counted twice
+        # (open order and position) rather than not at all.
+        open_orders = self.get_open_orders()
+        positions = self.get_positions()
+        return self.get_account(), positions, open_orders
+
     def get_bars(self, symbol: str, limit: int = 200) -> list[Bar]:
         # Calendar window wide enough to cover `limit` trading days, then keep the newest `limit`.
         start = datetime.now(timezone.utc) - timedelta(days=int(limit * 1.5) + 10)

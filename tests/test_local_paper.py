@@ -4,10 +4,11 @@ from datetime import date, datetime, timezone
 
 import pytest
 
+from agentrade.broker.base import BrokerError
 from agentrade.broker.local_paper import LocalPaperBroker
 from agentrade.config import RiskLimits
 from agentrade.journal import Journal
-from agentrade.models import Bar, OrderRequest, OrderStatus, OrderType, Side
+from agentrade.models import Bar, CorporateAction, OrderRequest, OrderStatus, OrderType, Side
 from agentrade.risk import RiskManager
 from agentrade.router import OrderRouter
 from agentrade.yahoo import Quote
@@ -35,6 +36,7 @@ class FakeData:
         self.bars: dict[str, list[Bar]] = {}
         self.quotes: dict[str, float] = {}
         self.quote_times: dict[str, datetime] = {}  # default: printed "now"
+        self.actions: dict[str, list[CorporateAction]] = {}
 
     def add_bar(self, symbol, d: date, o, h, l, c):
         bars = self.bars.setdefault(symbol, [])
@@ -47,6 +49,10 @@ class FakeData:
 
     def get_quote(self, symbol):
         return Quote(self.quotes[symbol], self.quote_times.get(symbol, self.clock()))
+
+    def get_corporate_actions(self, symbol, since):
+        today = self.clock().date()
+        return [a for a in self.actions.get(symbol, []) if since < a.session <= today]
 
 
 MON, TUE, WED = date(2026, 10, 19), date(2026, 10, 20), date(2026, 10, 21)
@@ -308,28 +314,146 @@ def test_queued_market_order_expires_when_its_session_has_no_data(env):
     assert broker.recent_events()[-1]["status"] == "expired"
 
 
-def test_a_fill_landing_between_the_routers_reads_cannot_bypass_position_limits(env):
-    """A queued order that fills while the router is reading state must not escape the risk check."""
+class LaggyData(FakeData):
+    """Hides Monday's bar until the `reveal_at`-th get_bars call, to land a fill at any point of a read."""
+
+    calls, reveal_at = 0, 10**9
+
+    def get_bars(self, symbol, limit=200):
+        self.calls += 1
+        bars = super().get_bars(symbol, limit)
+        return bars if self.calls >= self.reveal_at else [b for b in bars if b.t.date() != MON]
+
+
+@pytest.mark.parametrize("reveal_at", [1, 2, 3, 4, 10**9])
+@pytest.mark.parametrize("queued_side", ["buy", "sell"])
+def test_a_fill_landing_while_the_router_reads_cannot_bypass_position_limits(env, reveal_at, queued_side):
+    """Whenever a queued order fills relative to the router's reads, an oversized buy is rejected."""
     clock, data, broker, _ = env
-
-    class LaggyData(FakeData):
-        calls, reveal_at = 0, 10**9
-
-        def get_bars(self, symbol, limit=200):
-            self.calls += 1
-            bars = super().get_bars(symbol, limit)
-            return bars if self.calls >= self.reveal_at else [b for b in bars if b.t.date() != MON]
-
     laggy = LaggyData(clock)
     laggy.bars, laggy.quotes = data.bars, {"AAA": 100.0}
     broker.data = laggy
     router = OrderRouter(broker, RiskManager(RiskLimits(), allowed_symbols=["AAA"]), Journal(":memory:"))
-    clock.t = utc(2026, 10, 16, 22)
-    assert router.route(buy(200, stop=90)).order.status == OrderStatus.PENDING
+    clock.t = utc(2026, 10, 16, 15)  # Friday, open
+    if queued_side == "sell":
+        assert router.route(buy(200, stop=90)).order.status == OrderStatus.FILLED  # 20% of equity
+    clock.t = utc(2026, 10, 16, 22)  # Friday evening: queue for Monday's open
+    queued = buy(200, stop=90) if queued_side == "buy" else OrderRequest("AAA", Side.SELL, 100)
+    assert router.route(queued).order.status == OrderStatus.PENDING
 
     clock.t = utc(2026, 10, 19, 14, 1)
     laggy.add_bar("AAA", MON, 100, 101, 99, 100)
-    laggy.calls, laggy.reveal_at = 0, 3  # Monday's bar shows up midway through the router's reads
-    second = router.route(buy(200, stop=90))
-    assert not second.decision.approved
-    assert broker.get_positions()["AAA"].qty == 200
+    laggy.calls, laggy.reveal_at = 0, reveal_at
+    held_after = 200 if queued_side == "buy" else 100
+    oversized = buy(int(0.2 * 100_000 / 100) - held_after + 90, stop=90)  # 9 points over the 20% cap
+    assert not router.route(oversized).decision.approved
+
+    laggy.reveal_at = 0
+    assert broker.get_positions()["AAA"].qty == held_after
+
+
+def test_broker_side_rejections_are_journaled_as_not_approved_with_a_reason(env):
+    clock, data, broker, _ = env
+    journal = Journal(":memory:")
+    router = OrderRouter(broker, RiskManager(RiskLimits(), allowed_symbols=["AAA"]), journal)
+    clock.t = utc(2026, 10, 16, 15)
+    data.quotes["AAA"] = 100.0
+    router.route(buy(10, stop=95))
+    clock.t = utc(2026, 10, 19, 15)
+    data.add_bar("AAA", MON, 99, 100, 94, 99)  # this morning's dip already hit the stop
+    data.quotes["AAA"] = 99.0
+    result = router.route(buy(5, stop=96))
+    assert result.to_dict()["status"] == "rejected" and "stopped out" in result.to_dict()["broker_reason"]
+    assert journal.approved_orders_since(utc(2026, 10, 19)) == 0
+
+
+def test_splits_are_applied_before_the_restated_history_is_read(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 16, 15)
+    data.quotes["AAA"] = 1000.0
+    broker.submit_order(buy(10, stop=900))
+    # 10-for-1 split effective Monday: the feed restates every past bar in post-split shares.
+    data.bars["AAA"] = [Bar(b.t, b.open / 10, b.high / 10, b.low / 10, b.close / 10, b.volume) for b in data.bars["AAA"]]
+    data.add_bar("AAA", MON, 100, 101, 99, 100.5)
+    data.actions["AAA"] = [CorporateAction(MON, "split", ratio=10.0)]
+    clock.t = utc(2026, 10, 19, 21)
+    data.quotes["AAA"] = 100.5
+    pos = broker.get_positions()["AAA"]
+    assert pos.qty == 100 and pos.avg_price == pytest.approx(100.05)
+    assert broker.get_account().equity == pytest.approx(100_000 - 10 * 1000 * SLIP - 10 * 1000.5 * 0.0001 + 10 * 5,
+                                                        abs=0.01)
+    assert [f.reason for f in broker.get_fills()] == ["order"]  # no bogus stop-out
+
+
+def test_dividends_are_credited_to_shares_held_at_the_previous_close(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 16, 15)
+    data.quotes["AAA"] = 100.0
+    broker.submit_order(buy(10, stop=90))
+    cash_before = broker.get_account().cash
+    data.add_bar("AAA", MON, 99.5, 100, 99, 99.6)
+    data.actions["AAA"] = [CorporateAction(MON, "dividend", amount=0.5)]
+    clock.t = utc(2026, 10, 19, 21)
+    data.quotes["AAA"] = 99.6
+    assert broker.get_account().cash == pytest.approx(cash_before + 5.0)
+    clock.t = utc(2026, 10, 20, 21)  # credited once only
+    assert broker.get_account().cash == pytest.approx(cash_before + 5.0)
+
+
+def test_one_failed_fetch_does_not_skip_a_sessions_stop_check(env):
+    clock, data, broker, _ = env
+    hold_from_friday(clock, data, broker)
+    data.add_bar("AAA", MON, 99, 100, 90, 99)  # breach on Monday
+    data.add_bar("AAA", TUE, 99, 100, 98, 99)
+    fail = {"left": 1}
+    real_get_bars = data.get_bars
+
+    def flaky_get_bars(symbol, limit=200):
+        if fail["left"]:
+            fail["left"] -= 1
+            raise BrokerError("timeout")
+        return real_get_bars(symbol, limit)
+
+    data.get_bars = flaky_get_bars
+    clock.t = utc(2026, 10, 21, 12)
+    data.quotes["AAA"] = 99.0
+    broker.get_account()  # this look hit the timeout
+    assert "AAA" not in broker.get_positions()  # the next look still catches Monday's breach
+
+
+def test_orders_on_a_symbol_without_data_expire_after_a_grace_period(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 17, 15)
+    broker.submit_order(OrderRequest("GONE", Side.BUY, 10, stop_loss_price=1.0))
+    clock.t = utc(2026, 10, 20, 15)  # Monday's session plus a day has passed, and GONE has no data at all
+    data.quotes["AAA"] = 100.0
+    assert broker.get_open_orders() == []
+    assert broker.recent_events()[-1]["status"] == "expired"
+
+
+def test_reset_recovers_a_damaged_state_file(env):
+    clock, data, broker, tmp_path = env
+    (tmp_path / "paper.json").write_text('{"version": 1, "cash": 5')
+    with pytest.raises(BrokerError, match="reset-paper"):
+        broker.get_account()
+    fresh = LocalPaperBroker(data, tmp_path / "paper.json", initial_cash=10_000, now=clock, fresh=True)
+    assert fresh.get_account().equity == 10_000
+
+
+def test_a_split_is_inferred_when_the_feed_restates_history_without_an_event(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 16, 15)
+    data.quotes["AAA"] = 1000.0
+    data.bars["AAA"] = [Bar(b.t, 990, 1010, 980, 1000, b.volume) for b in data.bars["AAA"]]
+    data.add_bar("AAA", date(2026, 10, 15), 990, 1010, 980, 1000)
+    broker.submit_order(buy(10, stop=900))
+    # 15-for-1 split effective Monday; history restated, but no split event published (yet).
+    data.bars["AAA"] = [Bar(b.t, b.open / 15, b.high / 15, b.low / 15, b.close / 15, b.volume)
+                        for b in data.bars["AAA"]]
+    data.add_bar("AAA", MON, 66.5, 67.5, 66, 67)
+    clock.t = utc(2026, 10, 19, 21)
+    data.quotes["AAA"] = 67.0
+    pos = broker.get_positions()["AAA"]
+    assert pos.qty == pytest.approx(150) and pos.avg_price == pytest.approx(1000 * (1 + SLIP) / 15)
+    assert [f.reason for f in broker.get_fills()] == ["order"]
+    assert broker.recent_events()[-1]["status"] == "split"

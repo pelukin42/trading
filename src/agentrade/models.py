@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 
 
@@ -93,6 +93,7 @@ class Order:
     submitted_at: datetime
     filled_qty: float = 0.0
     filled_avg_price: float | None = None
+    reason: str | None = None  # why the broker rejected or canceled it, when it says
 
     @property
     def symbol(self) -> str:
@@ -114,6 +115,17 @@ class Fill:
     commission: float = 0.0
     realized_pnl: float = 0.0
     reason: str = "order"  # "order" | "stop"
+
+
+@dataclass(frozen=True)
+class CorporateAction:
+    """A split (ratio = new shares per old share) or a cash dividend (amount per share), effective
+    at the open of `session`. Amounts are expressed per share as of today, like split-adjusted prices."""
+
+    session: date
+    kind: str  # "split" | "dividend"
+    ratio: float = 1.0
+    amount: float = 0.0
 
 
 @dataclass

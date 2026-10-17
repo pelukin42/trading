@@ -92,8 +92,13 @@ def run_loop(stack: Stack, agent: TradingAgent, once: bool = False,
             sleep(3600)
             continue
 
-        result: CycleResult = agent.run_cycle()
-        on_cycle(result)
+        try:
+            result: CycleResult = agent.run_cycle()
+            on_cycle(result)
+        except Exception:
+            if once:
+                raise
+            log.exception("Cycle failed; retrying after the normal interval")
         if once:
             return
         sleep(s.cycle_minutes * 60)

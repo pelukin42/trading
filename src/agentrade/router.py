@@ -7,7 +7,7 @@ from datetime import datetime
 
 from .broker.base import Broker, BrokerError
 from .journal import Journal
-from .models import Order, OrderRequest, RiskDecision
+from .models import Order, OrderRequest, OrderStatus, RiskDecision
 from .risk import RiskManager, projected_exposure
 
 
@@ -20,7 +20,7 @@ class RouteResult:
 
     @property
     def submitted(self) -> bool:
-        return self.order is not None
+        return self.order is not None and self.order.status != OrderStatus.REJECTED
 
     def to_dict(self) -> dict:
         r = self.request
@@ -34,6 +34,8 @@ class RouteResult:
         if self.order:
             out["broker_order_id"] = self.order.id
             out["status"] = self.order.status.value
+            if self.order.reason:
+                out["broker_reason"] = self.order.reason
         if self.error:
             out["broker_error"] = self.error
         return out
@@ -50,15 +52,11 @@ class OrderRouter:
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
 
     def route(self, request: OrderRequest) -> RouteResult:
-        request.symbol = request.symbol.upper()
+        request.symbol = request.symbol.strip().upper()
         now = self.broker.clock().now
         try:
             price = self.broker.get_latest_price(request.symbol)
-            # Open orders first: one that fills between these calls is then counted twice (in open
-            # orders and in positions/cash) rather than not at all, so a race can only over-restrict.
-            open_orders = self.broker.get_open_orders()
-            positions = self.broker.get_positions()
-            account = self.broker.get_account()
+            account, positions, open_orders = self.broker.snapshot()
         except BrokerError as e:
             decision = RiskDecision(False, [f"Could not load account state: {e}"])
             return self._record(RouteResult(request, decision), now)
@@ -87,7 +85,7 @@ class OrderRouter:
         self.journal.order(
             self.cycle_id, symbol=r.symbol, side=r.side.value, qty=r.qty, order_type=r.order_type.value,
             limit_price=r.limit_price, stop_loss_price=r.stop_loss_price,
-            approved=result.decision.approved and result.error is None,
+            approved=result.submitted,  # passed risk *and* accepted by the broker
             risk_reasons=result.decision.reasons, broker_order_id=result.order.id if result.order else None,
             status=result.order.status.value if result.order else ("error" if result.error else "rejected"),
             rationale=r.rationale, t=now,

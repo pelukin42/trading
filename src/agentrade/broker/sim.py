@@ -125,6 +125,9 @@ class SimBroker:
     def get_open_orders(self) -> list[Order]:
         return list(self.pending)
 
+    def snapshot(self) -> tuple[Account, dict[str, Position], list[Order]]:
+        return self.get_account(), self.get_positions(), self.get_open_orders()
+
     # --- orders -----------------------------------------------------------------------
 
     def submit_order(self, order: OrderRequest) -> Order:

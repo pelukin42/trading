@@ -32,15 +32,28 @@ def _env(name: str, default: str) -> str:
 
 
 def _float(name: str, default: float) -> float:
-    return float(_env(name, str(default)))
+    raw = _env(name, str(default))
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError(f"{name} must be a number (e.g. 100000 or 0.2), got {raw!r}") from None
 
 
 def _int(name: str, default: int) -> int:
-    return int(_env(name, str(default)))
+    raw = _env(name, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError(f"{name} must be a whole number, got {raw!r}") from None
 
 
 def _bool(name: str, default: bool) -> bool:
-    return _env(name, "1" if default else "0").strip().lower() in {"1", "true", "yes", "on"}
+    raw = _env(name, "1" if default else "0").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off", ""}:
+        return False
+    raise ConfigError(f"{name} must be 1 or 0, got {raw!r}")
 
 
 def _list(name: str, default: str) -> list[str]:

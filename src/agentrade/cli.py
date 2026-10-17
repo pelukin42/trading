@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
+from pathlib import Path
 
 from .agent import CycleResult
 from .backtest import Backtester, BacktestResult
@@ -128,8 +130,11 @@ def cmd_reset_paper(args: argparse.Namespace, settings: Settings) -> int:
         return 2
     from .broker.local_paper import LocalPaperBroker
     from .yahoo import YahooData
-    LocalPaperBroker(YahooData(), settings.paper_state_path).reset(args.cash)
-    print(f"Cuenta de práctica reiniciada con ${args.cash:,.2f}.")
+    cash = args.cash if args.cash is not None else settings.paper_initial_cash
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    # fresh=True: never reads the old file, so this also recovers a damaged one.
+    LocalPaperBroker(YahooData(), settings.paper_state_path, initial_cash=cash, fresh=True)
+    print(f"Cuenta de práctica reiniciada con ${cash:,.2f}.")
     return 0
 
 
@@ -194,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("resume", help="Desactivar el kill switch").set_defaults(func=cmd_resume)
 
     p = sub.add_parser("reset-paper", help="Reiniciar la cuenta de práctica local")
-    p.add_argument("--cash", type=float, default=100_000.0)
+    p.add_argument("--cash", type=float, default=None, help="Por defecto, AGENTRADE_PAPER_CASH")
     p.add_argument("--yes", action="store_true", help="Confirmar el reinicio")
     p.set_defaults(func=cmd_reset_paper)
 
@@ -204,7 +209,21 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(asctime)s %(message)s")
-    settings = Settings.from_env()
+    if not args.verbose:
+        for noisy in ("httpx", "httpx2", "anthropic"):  # one line per HTTP request otherwise
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+    try:
+        settings = Settings.from_env()
+    except ConfigError as e:
+        print(f"Configuración inválida: {e}", file=sys.stderr)
+        if args.command == "kill":
+            # The emergency stop must work even with a broken config: it only needs the data dir.
+            data_dir = Path(os.environ.get("AGENTRADE_DATA_DIR", "data"))
+            data_dir.mkdir(parents=True, exist_ok=True)
+            (data_dir / "KILL").write_text("halted by user\n")
+            print("Kill switch ACTIVADO igualmente. Corrige la configuración para poder usar --flatten.")
+            return 0
+        return 2
     try:
         return args.func(args, settings)
     except PermissionError as e:

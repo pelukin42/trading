@@ -105,6 +105,9 @@ con un modelo alternativo (`fallbacks: "default"`).
   redistribuirlos. Para vender la plataforma hace falta un proveedor de datos con licencia.
 - La cuenta de práctica local usa barras diarias, no intradía: un stop que se toca y se recupera
   entre dos revisiones solo se detecta al cerrar el día (por el mínimo diario).
+- La cuenta de práctica local aplica splits (por evento o detectando que Yahoo reescribió el
+  historial) y acredita dividendos en la fecha ex-dividendo. Si pasa mucho tiempo sin abrirse, al
+  volver reproduce día por día lo que ocurrió: órdenes en cola, stops y dividendos.
 - Venderlo a terceros cambia el marco legal: si la plataforma opera o recomienda sobre el dinero de
   otros, puede requerir registro ante el regulador de valores de cada país. Consulta a un abogado
   antes de cobrar.

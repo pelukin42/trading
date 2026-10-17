@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 from typing import Any
 
@@ -13,6 +14,7 @@ from ..models import OrderRequest, OrderType, Side
 from ..router import OrderRouter
 
 MAX_HISTORY_DAYS = 120
+log = logging.getLogger("agentrade")
 
 TOOLS: list[dict[str, Any]] = [
     {
@@ -131,7 +133,7 @@ class ToolExecutor:
         self.broker = broker
         self.router = router
         self.limits = limits
-        self.watchlist = [s.upper() for s in watchlist]
+        self.watchlist = [s.strip().upper() for s in watchlist]
 
     def execute(self, name: str, args: dict[str, Any]) -> tuple[str, bool]:
         """Returns (json_result, is_error)."""
@@ -142,11 +144,12 @@ class ToolExecutor:
             return json.dumps(handler(**args), sort_keys=True, ensure_ascii=False), False
         except (BrokerError, ValueError, TypeError, KeyError) as e:
             return json.dumps({"error": f"{type(e).__name__}: {e}"}), True
+        except Exception as e:  # a tool bug must not take down the trading loop
+            log.exception("Tool %s failed", name)
+            return json.dumps({"error": f"Internal error in {name}: {type(e).__name__}"}), True
 
     def _tool_get_portfolio(self) -> dict[str, Any]:
-        account = self.broker.get_account()
-        positions = self.broker.get_positions()
-        open_orders = self.broker.get_open_orders()
+        account, positions, open_orders = self.broker.snapshot()
         L = self.limits
         gross = sum(abs(p.market_value) for p in positions.values())
         eq = account.equity or 1.0
@@ -183,16 +186,16 @@ class ToolExecutor:
         out = []
         for s in symbols[:20]:
             try:
-                out.append(market_snapshot(self.broker, s.upper()))
+                out.append(market_snapshot(self.broker, s.strip().upper()))
             except BrokerError as e:
-                out.append({"symbol": s.upper(), "error": str(e)})
+                out.append({"symbol": s.strip().upper(), "error": str(e)})
         return {"snapshots": out}
 
     def _tool_get_price_history(self, symbol: str, days: int) -> dict[str, Any]:
         days = min(max(int(days), 5), MAX_HISTORY_DAYS)
-        bars = self.broker.get_bars(symbol.upper(), limit=days)
+        bars = self.broker.get_bars(symbol.strip().upper(), limit=days)
         return {
-            "symbol": symbol.upper(),
+            "symbol": symbol.strip().upper(),
             "columns": ["date", "open", "high", "low", "close", "volume"],
             "bars": [[b.t.date().isoformat(), round(b.open, 2), round(b.high, 2), round(b.low, 2),
                       round(b.close, 2), int(b.volume)] for b in bars],
@@ -201,7 +204,7 @@ class ToolExecutor:
     def _tool_place_order(self, symbol: str, side: str, quantity: float, quantity_type: str, order_type: str,
                           rationale: str, limit_price: float | None = None,
                           stop_loss_price: float | None = None) -> dict[str, Any]:
-        symbol = symbol.upper()
+        symbol = symbol.strip().upper()
         otype = OrderType(order_type)
         if otype == OrderType.LIMIT and not limit_price:
             raise ValueError("limit orders need limit_price")
@@ -218,7 +221,7 @@ class ToolExecutor:
         return self.router.route(req).to_dict()
 
     def _tool_close_position(self, symbol: str, rationale: str) -> dict[str, Any]:
-        symbol = symbol.upper()
+        symbol = symbol.strip().upper()
         pos = self.broker.get_positions().get(symbol)
         if not pos or pos.qty <= 0:
             raise ValueError(f"no open position in {symbol}")

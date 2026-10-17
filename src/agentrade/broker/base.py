@@ -34,6 +34,10 @@ class Broker(Protocol):
         """Open entry/exit orders. Protective stop legs are excluded: they don't change target exposure."""
         ...
 
+    def snapshot(self) -> tuple[Account, dict[str, Position], list[Order]]:
+        """Account, positions and open orders, as consistent with each other as the broker allows."""
+        ...
+
     def get_bars(self, symbol: str, limit: int = 200) -> list[Bar]:
         """Daily bars up to the broker's current time, oldest first."""
         ...
