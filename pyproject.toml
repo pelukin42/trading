@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = [
     "anthropic>=1.15",
     "httpx2>=2.13",
+    "tzdata; sys_platform == 'win32'",  # Windows has no system time zone database for zoneinfo
 ]
 
 [project.optional-dependencies]

@@ -12,10 +12,12 @@ import anthropic
 from .agent import CycleResult, TradingAgent
 from .broker.alpaca import AlpacaBroker
 from .broker.base import Broker, BrokerError
+from .broker.local_paper import LocalPaperBroker
 from .config import Settings
 from .journal import Journal
 from .risk import RiskManager
 from .router import OrderRouter
+from .yahoo import YahooData
 
 log = logging.getLogger("agentrade")
 
@@ -29,11 +31,17 @@ class Stack:
     router: OrderRouter
 
 
+def make_broker(settings: Settings) -> Broker:
+    if settings.broker == "alpaca":
+        return AlpacaBroker(settings.alpaca_key_id, settings.alpaca_secret_key,
+                            live=settings.mode == "live", data_feed=settings.alpaca_data_feed)
+    return LocalPaperBroker(YahooData(), settings.paper_state_path, initial_cash=settings.paper_initial_cash)
+
+
 def build_stack(settings: Settings, broker: Broker | None = None, journal: Journal | None = None) -> Stack:
     settings.validate_live()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    broker = broker or AlpacaBroker(settings.alpaca_key_id, settings.alpaca_secret_key,
-                                    live=settings.mode == "live", data_feed=settings.alpaca_data_feed)
+    broker = broker or make_broker(settings)
     journal = journal or Journal(settings.journal_path)
     risk = RiskManager(settings.risk, allowed_symbols=settings.watchlist, kill_switch_path=settings.kill_switch_path)
     return Stack(settings, broker, journal, risk, OrderRouter(broker, risk, journal))

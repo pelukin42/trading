@@ -31,11 +31,19 @@ class CountingAgent:
 
 def test_live_mode_requires_typed_confirmation(monkeypatch, tmp_path):
     monkeypatch.delenv("AGENTRADE_LIVE_CONFIRM", raising=False)
-    s = Settings(mode="live", data_dir=tmp_path)
+    s = Settings(mode="live", broker="alpaca", data_dir=tmp_path)
     with pytest.raises(PermissionError):
         s.validate_live()
     monkeypatch.setenv("AGENTRADE_LIVE_CONFIRM", LIVE_CONFIRMATION)
     s.validate_live()
+
+
+def test_live_mode_is_refused_on_the_local_paper_account(monkeypatch, tmp_path):
+    from agentrade.config import ConfigError
+
+    monkeypatch.setenv("AGENTRADE_LIVE_CONFIRM", LIVE_CONFIRMATION)
+    with pytest.raises(ConfigError):
+        Settings(mode="live", broker="local", data_dir=tmp_path).validate_live()
 
 
 def test_dotenv_does_not_override_existing_env(monkeypatch, tmp_path):

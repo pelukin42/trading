@@ -9,8 +9,8 @@ from __future__ import annotations
 import itertools
 from datetime import datetime
 
-from ..models import (Account, Bar, Fill, Order, OrderRequest, OrderStatus, OrderType,
-                      Position, Side)
+from ..ledger import Ledger
+from ..models import Account, Bar, Order, OrderRequest, OrderStatus, OrderType, Position, Side
 from .base import BrokerError, Clock
 
 
@@ -26,20 +26,33 @@ class SimBroker:
         self._by_time = {s: {b.t: b for b in bars} for s, bars in self.history.items()}
         self._index_of = {s: {b.t: i for i, b in enumerate(bars)} for s, bars in self.history.items()}
         self.cursor = start_index
-        self.cash = initial_cash
+        self.ledger = Ledger(cash=initial_cash)
         self.commission_bps = commission_bps
         self.slippage_bps = slippage_bps
-        self.positions: dict[str, Position] = {}
-        self.stops: dict[str, float] = {}
         self.pending: list[Order] = []
         self.orders: list[Order] = []
-        self.fills: list[Fill] = []
         self.equity_curve: list[tuple[datetime, float]] = []
         self._ids = itertools.count(1)
         self._day_start_equity = initial_cash
         self._mark()
 
     # --- time -------------------------------------------------------------------------
+
+    @property
+    def cash(self) -> float:
+        return self.ledger.cash
+
+    @property
+    def positions(self) -> dict[str, Position]:
+        return self.ledger.positions
+
+    @property
+    def stops(self) -> dict[str, float]:
+        return self.ledger.stops
+
+    @property
+    def fills(self):
+        return self.ledger.fills
 
     @property
     def now(self) -> datetime:
@@ -92,7 +105,7 @@ class SimBroker:
     # --- account ----------------------------------------------------------------------
 
     def _equity(self) -> float:
-        return self.cash + sum(p.market_value for p in self.positions.values())
+        return self.ledger.equity()
 
     def _mark(self) -> None:
         for s, p in self.positions.items():
@@ -161,45 +174,13 @@ class SimBroker:
         return None
 
     def _fill(self, o: Order, price: float, reason: str = "order") -> None:
-        req = o.request
-        qty = req.qty
-        pos = self.positions.get(req.symbol)
-        commission_rate = self.commission_bps / 10_000
-        if req.side == Side.BUY:
-            affordable = self.cash / (price * (1 + commission_rate))
-            qty = min(qty, max(affordable, 0.0))
-            if qty <= 1e-9:
-                o.status = OrderStatus.REJECTED
-                return
-        else:
-            qty = min(qty, pos.qty if pos else 0.0)
-            if qty <= 1e-9:
-                o.status = OrderStatus.REJECTED
-                return
-
-        commission = qty * price * commission_rate
-        realized = 0.0
-        if req.side == Side.BUY:
-            self.cash -= qty * price + commission
-            if pos:
-                pos.avg_price = (pos.avg_price * pos.qty + price * qty) / (pos.qty + qty)
-                pos.qty += qty
-            else:
-                self.positions[req.symbol] = Position(req.symbol, qty, price, price)
-            if req.stop_loss_price:
-                self.stops[req.symbol] = req.stop_loss_price
-        else:
-            self.cash += qty * price - commission
-            realized = (price - pos.avg_price) * qty - commission
-            pos.qty -= qty
-            if pos.qty <= 1e-9:
-                del self.positions[req.symbol]
-                self.stops.pop(req.symbol, None)
-
+        qty = self.ledger.apply_fill(o.id, o.request, price, self.now, self.commission_bps, reason)
+        if qty <= 0:
+            o.status = OrderStatus.REJECTED
+            return
         o.filled_qty = qty
         o.filled_avg_price = price
-        o.status = OrderStatus.FILLED if qty >= req.qty - 1e-9 else OrderStatus.PARTIALLY_FILLED
-        self.fills.append(Fill(o.id, req.symbol, req.side, qty, price, self.now, commission, realized, reason))
+        o.status = OrderStatus.FILLED if qty >= o.request.qty - 1e-9 else OrderStatus.PARTIALLY_FILLED
 
     def _process_stops(self) -> None:
         for symbol, stop in list(self.stops.items()):

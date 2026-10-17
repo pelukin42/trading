@@ -22,7 +22,7 @@ modelo no puede negociar ni saltarse.
 |---|---|---|
 | Agente | `src/agentrade/agent/` | Loop de herramientas con Claude: portafolio, datos de mercado, órdenes, cierre. Reporte por ciclo que alimenta al siguiente. Búsqueda web de noticias opcional. |
 | Riesgo | `src/agentrade/risk.py` | Tamaño máximo por posición, exposición bruta, nº de posiciones, tope por orden, pérdida diaria máxima, órdenes por día, stop-loss obligatorio, sin cortos, watchlist, kill switch. Reducir riesgo siempre está permitido. |
-| Brokers | `src/agentrade/broker/` | Alpaca (paper y live, órdenes OTO con stop GTC) y un simulador sin sesgo de anticipación (llena en la apertura de la barra siguiente). |
+| Brokers | `src/agentrade/broker/` | **Cuenta de práctica local** (por defecto: sin registrarte en ningún broker, precios reales de Yahoo Finance, horario y feriados oficiales de NYSE, estado guardado en `data/paper_account.json`), Alpaca (paper y live, órdenes OTO con stop GTC) y un simulador de backtests sin sesgo de anticipación. |
 | Backtesting | `src/agentrade/backtest.py` | Mismo router y mismo riesgo que en vivo. Métricas: CAGR, Sharpe, drawdown, tasa de acierto, salidas por stop, contra buy & hold. |
 | Estrategias base | `src/agentrade/strategies.py` | `sma_cross`, `momentum`, `equal_weight`: la vara que el agente debe superar para justificar su costo. |
 | Diario | `src/agentrade/journal.py` | Cada ciclo, llamada a herramienta, resumen de razonamiento, veredicto de riesgo y orden. |
@@ -32,16 +32,16 @@ modelo no puede negociar ni saltarse.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env       # completa ANTHROPIC_API_KEY y las claves PAPER de Alpaca
+cp .env.example .env       # basta con ANTHROPIC_API_KEY; Alpaca es opcional
 pytest -q                  # corre sin red ni claves
 ```
 
 ### 1. Backtest de estrategias (gratis, sin claves)
 
 ```bash
-agentrade backtest --strategy sma_cross               # datos sintéticos
-agentrade backtest --strategy momentum --source alpaca --days 1000
-agentrade backtest --strategy sma_cross --source csv:./mis_datos   # AAPL.csv con date,open,high,low,close,volume
+agentrade backtest --strategy sma_cross                              # datos sintéticos
+agentrade backtest --strategy momentum --source yahoo --days 1000    # precios reales
+agentrade backtest --strategy sma_cross --source csv:./mis_datos     # AAPL.csv con date,open,high,low,close,volume
 ```
 
 ### 2. Backtest del agente (consume API de Claude)
@@ -54,22 +54,32 @@ Decide una vez por semana (`--every 5`) durante 20 ciclos e imprime el costo acu
 Con datos sintéticos el modelo no puede "recordar" el futuro; con datos reales de tickers conocidos
 sí podría tener sesgo por su entrenamiento, así que trata esos resultados con escepticismo.
 
-### 3. Operar en paper
+### 3. Operar en práctica (paper)
+
+Por defecto (`AGENTRADE_BROKER=local`) la plataforma lleva su propia cuenta de práctica con US$100.000
+virtuales: no necesitas cuenta en ningún broker. Las órdenes a mercado se ejecutan al precio actual si
+NYSE está abierto, o en la apertura de la siguiente sesión si está cerrado; los stops se vigilan con el
+precio en vivo y con los mínimos diarios.
 
 ```bash
 agentrade run --once     # un ciclo y salir (ideal para cron)
 agentrade run            # bucle: cada AGENTRADE_CYCLE_MINUTES con el mercado abierto
-agentrade status         # cuenta, posiciones, kill switch
+agentrade status         # cuenta, posiciones, órdenes pendientes, kill switch
 agentrade journal -n 5   # qué decidió el agente y por qué
 agentrade kill --flatten # detener todo y cerrar posiciones
 agentrade resume
+agentrade reset-paper --cash 100000 --yes   # empezar de cero
 ```
+
+Para usar una cuenta paper de Alpaca en su lugar: `AGENTRADE_BROKER=alpaca` más sus claves en `.env`.
 
 ### 4. Pasar a dinero real
 
-Solo después de semanas en paper con resultados que superen a las estrategias base:
+Solo después de semanas en paper con resultados que superen a las estrategias base. Requiere un broker
+real (Alpaca):
 
 ```bash
+AGENTRADE_BROKER=alpaca
 AGENTRADE_MODE=live
 AGENTRADE_LIVE_CONFIRM=I_UNDERSTAND_REAL_MONEY_IS_AT_RISK
 ```
@@ -91,6 +101,10 @@ con un modelo alternativo (`fallbacks: "default"`).
   ajustado por riesgo; si no lo logra, no debe operar con dinero real.
 - La integración con Alpaca está probada contra respuestas simuladas de su API; valídala primero
   en tu cuenta paper.
+- Los datos de Yahoo Finance son no oficiales y para uso personal: sus términos no permiten
+  redistribuirlos. Para vender la plataforma hace falta un proveedor de datos con licencia.
+- La cuenta de práctica local usa barras diarias, no intradía: un stop que se toca y se recupera
+  entre dos revisiones solo se detecta al cerrar el día (por el mínimo diario).
 - Venderlo a terceros cambia el marco legal: si la plataforma opera o recomienda sobre el dinero de
   otros, puede requerir registro ante el regulador de valores de cada país. Consulta a un abogado
   antes de cobrar.

@@ -71,3 +71,11 @@ def load_csv_dir(directory: str | Path, symbols: list[str] | None = None) -> dic
     if wanted and (missing := wanted - out.keys()):
         raise FileNotFoundError(f"No CSV for: {', '.join(sorted(missing))} in {directory}")
     return out
+
+
+def yahoo_history(symbols: list[str], days: int = 750) -> dict[str, list[Bar]]:
+    """Real daily bars from Yahoo Finance (no key needed; personal use)."""
+    from .yahoo import YahooData
+
+    yd = YahooData()
+    return {s.upper(): yd.get_bars(s, limit=days) for s in symbols}

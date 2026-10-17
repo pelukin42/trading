@@ -10,8 +10,8 @@ import sys
 from .agent import CycleResult
 from .backtest import Backtester, BacktestResult
 from .broker.base import BrokerError
-from .config import Settings, load_dotenv
-from .data import load_csv_dir, synthetic_history
+from .config import ConfigError, Settings, load_dotenv
+from .data import load_csv_dir, synthetic_history, yahoo_history
 from .engine import build_agent, build_stack, run_loop
 from .strategies import STRATEGIES
 
@@ -42,6 +42,8 @@ def _load_history(args: argparse.Namespace, settings: Settings):
     symbols = [s.strip().upper() for s in args.symbols.split(",")] if args.symbols else settings.watchlist
     if args.source == "synthetic":
         return synthetic_history(symbols, days=args.days, seed=args.seed)
+    if args.source == "yahoo":
+        return yahoo_history(symbols, days=args.days)
     if args.source.startswith("csv:"):
         return load_csv_dir(args.source[4:], symbols)
     if args.source == "alpaca":
@@ -104,12 +106,30 @@ def cmd_run(args: argparse.Namespace, settings: Settings) -> int:
 def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     stack = build_stack(settings)
     a = stack.broker.get_account()
-    print(f"Modo: {settings.mode}  Equity: ${a.equity:,.2f}  Cash: ${a.cash:,.2f}  "
-          f"P&L hoy: ${a.day_pnl:,.2f} ({a.day_pnl_pct:+.2%})")
+    clock = stack.broker.clock()
+    print(f"Broker: {stack.broker.name}  Modo: {settings.mode}  "
+          f"Mercado: {'ABIERTO' if clock.is_open else f'cerrado (abre {clock.next_open:%Y-%m-%d %H:%M} UTC)'}")
+    print(f"Equity: ${a.equity:,.2f}  Cash: ${a.cash:,.2f}  P&L hoy: ${a.day_pnl:,.2f} ({a.day_pnl_pct:+.2%})")
     print(f"Kill switch: {'ACTIVO' if stack.risk.kill_switch_active() else 'inactivo'}")
     for p in stack.broker.get_positions().values():
         print(f"  {p.symbol:<6} {p.qty:>8g} @ {p.avg_price:>9.2f}  ahora {p.market_price:>9.2f}  "
               f"P&L {p.unrealized_pnl:>+10.2f} ({p.unrealized_pnl_pct:+.2%})")
+    for o in stack.broker.get_open_orders():
+        print(f"  pendiente: {o.request.side.value} {o.remaining_qty:g} {o.symbol} ({o.request.order_type.value})")
+    return 0
+
+
+def cmd_reset_paper(args: argparse.Namespace, settings: Settings) -> int:
+    if settings.broker != "local":
+        print("reset-paper solo aplica a la cuenta de práctica local (AGENTRADE_BROKER=local).")
+        return 2
+    if not args.yes:
+        print("Esto borra posiciones, órdenes e historial de la cuenta de práctica. Repite con --yes para confirmar.")
+        return 2
+    from .broker.local_paper import LocalPaperBroker
+    from .yahoo import YahooData
+    LocalPaperBroker(YahooData(), settings.paper_state_path).reset(args.cash)
+    print(f"Cuenta de práctica reiniciada con ${args.cash:,.2f}.")
     return 0
 
 
@@ -153,7 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("backtest", help="Simular una estrategia o el agente sobre datos históricos")
     p.add_argument("--strategy", choices=[*STRATEGIES, "agent"], default="sma_cross")
     p.add_argument("--symbols", help="Lista separada por comas (por defecto, la watchlist)")
-    p.add_argument("--source", default="synthetic", help="synthetic | alpaca | csv:<directorio>")
+    p.add_argument("--source", default="synthetic", help="synthetic | yahoo | alpaca | csv:<directorio>")
     p.add_argument("--days", type=int, default=750)
     p.add_argument("--seed", type=int, default=7)
     p.add_argument("--cash", type=float, default=100_000.0)
@@ -173,6 +193,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("resume", help="Desactivar el kill switch").set_defaults(func=cmd_resume)
 
+    p = sub.add_parser("reset-paper", help="Reiniciar la cuenta de práctica local")
+    p.add_argument("--cash", type=float, default=100_000.0)
+    p.add_argument("--yes", action="store_true", help="Confirmar el reinicio")
+    p.set_defaults(func=cmd_reset_paper)
+
     p = sub.add_parser("journal", help="Ver los últimos ciclos del agente")
     p.add_argument("-n", type=int, default=5)
     p.set_defaults(func=cmd_journal)
@@ -184,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args, settings)
     except PermissionError as e:
         print(f"Bloqueado: {e}", file=sys.stderr)
+        return 2
+    except ConfigError as e:
+        print(f"Configuración inválida: {e}", file=sys.stderr)
         return 2
     except BrokerError as e:
         print(f"Error del broker: {e}", file=sys.stderr)

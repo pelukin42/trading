@@ -9,6 +9,10 @@ from pathlib import Path
 LIVE_CONFIRMATION = "I_UNDERSTAND_REAL_MONEY_IS_AT_RISK"
 
 
+class ConfigError(ValueError):
+    pass
+
+
 def load_dotenv(path: str | Path = ".env") -> None:
     """Minimal .env loader. Never overrides variables already set in the environment."""
     p = Path(path)
@@ -76,6 +80,10 @@ class RiskLimits:
 @dataclass
 class Settings:
     mode: str = "paper"  # "paper" | "live"
+    # "local": built-in paper account priced with Yahoo Finance data (no broker sign-up needed).
+    # "alpaca": Alpaca paper or live account.
+    broker: str = "local"
+    paper_initial_cash: float = 100_000.0
     watchlist: list[str] = field(default_factory=lambda: ["SPY", "QQQ", "AAPL", "MSFT", "NVDA", "AMZN"])
     data_dir: Path = Path("data")
 
@@ -99,6 +107,8 @@ class Settings:
         d = cls()
         return cls(
             mode=_env("AGENTRADE_MODE", d.mode).lower(),
+            broker=_env("AGENTRADE_BROKER", d.broker).lower(),
+            paper_initial_cash=_float("AGENTRADE_PAPER_CASH", d.paper_initial_cash),
             watchlist=_list("AGENTRADE_WATCHLIST", ",".join(d.watchlist)),
             data_dir=Path(_env("AGENTRADE_DATA_DIR", str(d.data_dir))),
             model=_env("AGENTRADE_MODEL", d.model),
@@ -122,10 +132,18 @@ class Settings:
     def journal_path(self) -> Path:
         return self.data_dir / "journal.sqlite3"
 
+    @property
+    def paper_state_path(self) -> Path:
+        return self.data_dir / "paper_account.json"
+
     def validate_live(self) -> None:
         """Live trading requires an explicit, typed confirmation in the environment."""
         if self.mode not in {"paper", "live"}:
-            raise ValueError(f"AGENTRADE_MODE must be 'paper' or 'live', got {self.mode!r}")
+            raise ConfigError(f"AGENTRADE_MODE must be 'paper' or 'live', got {self.mode!r}")
+        if self.broker not in {"local", "alpaca"}:
+            raise ConfigError(f"AGENTRADE_BROKER must be 'local' or 'alpaca', got {self.broker!r}")
+        if self.mode == "live" and self.broker != "alpaca":
+            raise ConfigError("Live trading needs a real broker: set AGENTRADE_BROKER=alpaca.")
         if self.mode == "live" and os.environ.get("AGENTRADE_LIVE_CONFIRM") != LIVE_CONFIRMATION:
             raise PermissionError(
                 "Live mode is locked. Set AGENTRADE_LIVE_CONFIRM="
