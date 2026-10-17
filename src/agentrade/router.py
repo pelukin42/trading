@@ -54,9 +54,11 @@ class OrderRouter:
         now = self.broker.clock().now
         try:
             price = self.broker.get_latest_price(request.symbol)
-            account = self.broker.get_account()
-            positions = self.broker.get_positions()
+            # Open orders first: one that fills between these calls is then counted twice (in open
+            # orders and in positions/cash) rather than not at all, so a race can only over-restrict.
             open_orders = self.broker.get_open_orders()
+            positions = self.broker.get_positions()
+            account = self.broker.get_account()
         except BrokerError as e:
             decision = RiskDecision(False, [f"Could not load account state: {e}"])
             return self._record(RouteResult(request, decision), now)

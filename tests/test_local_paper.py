@@ -34,16 +34,19 @@ class FakeData:
         self.clock = clock
         self.bars: dict[str, list[Bar]] = {}
         self.quotes: dict[str, float] = {}
+        self.quote_times: dict[str, datetime] = {}  # default: printed "now"
 
     def add_bar(self, symbol, d: date, o, h, l, c):
-        self.bars.setdefault(symbol, []).append(Bar(datetime(d.year, d.month, d.day, 13, 30, tzinfo=timezone.utc),
-                                                    o, h, l, c, 1e6))
+        bars = self.bars.setdefault(symbol, [])
+        t = datetime(d.year, d.month, d.day, 13, 30, tzinfo=timezone.utc)
+        bars[:] = [b for b in bars if b.t != t] + [Bar(t, o, h, l, c, 1e6)]  # re-adding a day replaces it
+        bars.sort(key=lambda b: b.t)
 
     def get_bars(self, symbol, limit=200):
         return [b for b in self.bars.get(symbol, []) if b.t <= self.clock()][-limit:]
 
     def get_quote(self, symbol):
-        return Quote(self.quotes[symbol], self.clock())
+        return Quote(self.quotes[symbol], self.quote_times.get(symbol, self.clock()))
 
 
 MON, TUE, WED = date(2026, 10, 19), date(2026, 10, 20), date(2026, 10, 21)
@@ -189,3 +192,144 @@ def test_router_and_risk_work_on_top_of_the_local_account(env):
     rejected = router.route(buy(10))  # no stop
     ok = router.route(buy(10, stop=92))
     assert not rejected.decision.approved and ok.order.status == OrderStatus.FILLED
+
+
+# --- regressions from the adversarial review -----------------------------------------------
+
+FRI = date(2026, 10, 16)
+
+
+def hold_from_friday(clock, data, broker, qty=10, stop=95.0):
+    """Enter intraday on Friday (its bar low 98 stays above the stop)."""
+    clock.t = utc(2026, 10, 16, 15)
+    data.quotes["AAA"] = 100.0
+    broker.submit_order(buy(qty, stop=stop))
+
+
+def test_intraday_add_first_checks_the_days_range_against_the_existing_stop(env):
+    clock, data, broker, _ = env
+    hold_from_friday(clock, data, broker)
+    clock.t = utc(2026, 10, 19, 15)
+    data.add_bar("AAA", MON, 99, 100, 94, 99)  # dipped to 94 this morning, back at 99 now
+    data.quotes["AAA"] = 99.0
+    o = broker.submit_order(buy(5, stop=96))
+    assert o.status == OrderStatus.REJECTED
+    assert "AAA" not in broker.get_positions()
+    fills = broker.get_fills()
+    assert [f.reason for f in fills] == ["order", "stop"] and fills[-1].price == pytest.approx(95 * (1 - SLIP))
+    assert broker.recent_events()[-1]["status"] == "rejected"
+
+
+def test_catch_up_reaches_back_further_than_ten_sessions(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 17, 15)
+    broker.submit_order(buy(10, stop=95))  # queued for Monday's open
+    d = MON
+    while d <= date(2026, 11, 6):
+        if d.weekday() < 5:
+            low = 90 if d == TUE else 99
+            data.add_bar("AAA", d, 100, 101, low, 100)
+        d = date.fromordinal(d.toordinal() + 1)
+    clock.t = utc(2026, 11, 9, 15)
+    data.quotes["AAA"] = 100.0
+    assert broker.get_open_orders() == [] and broker.get_positions() == {}
+    fills = broker.get_fills()
+    assert [(f.reason, f.t.date()) for f in fills] == [("order", MON), ("stop", TUE)]
+
+
+def test_missed_sessions_are_settled_before_the_new_day_pnl_baseline(env):
+    clock, data, broker, _ = env
+    hold_from_friday(clock, data, broker, qty=200, stop=88)
+    data.add_bar("AAA", MON, 100, 101, 85, 100)  # stop hit Monday while nobody was looking
+    data.add_bar("AAA", TUE, 100, 101, 99, 100)
+    clock.t = utc(2026, 10, 20, 14, 30)
+    data.quotes["AAA"] = 100.0
+    a = broker.get_account()
+    assert broker.get_positions() == {}
+    assert a.day_pnl == pytest.approx(0.0)  # Monday's loss belongs to Monday
+
+
+def test_market_order_before_the_first_print_takes_the_opening_price(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 19, 13, 30, 20)  # 9:30:20 ET
+    data.quotes["AAA"] = 100.0               # still Friday's close
+    data.quote_times["AAA"] = utc(2026, 10, 16, 20)
+    o = broker.submit_order(buy(10))
+    assert o.status == OrderStatus.PENDING
+    data.add_bar("AAA", MON, 105, 106, 104, 105.5)
+    data.quotes["AAA"] = 105.5
+    data.quote_times.pop("AAA")
+    clock.t = utc(2026, 10, 19, 13, 35)
+    assert broker.get_positions()["AAA"].avg_price == pytest.approx(105 * (1 + SLIP))
+
+
+def test_queued_orders_execute_in_submission_order_for_the_same_symbol(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 17, 15)          # Saturday: buy...
+    broker.submit_order(buy(10))
+    clock.t = utc(2026, 10, 18, 15)          # ...Sunday: changed my mind
+    broker.submit_order(OrderRequest("AAA", Side.SELL, 10))
+    clock.t = utc(2026, 10, 19, 14)
+    data.add_bar("AAA", MON, 100, 101, 99, 100)
+    data.quotes["AAA"] = 100.0
+    assert broker.get_positions() == {}
+    assert [f.side for f in broker.get_fills()] == [Side.BUY, Side.SELL]
+
+
+def test_a_stop_out_cancels_the_symbols_other_orders(env):
+    clock, data, broker, _ = env
+    data.quotes["AAA"] = 100.0
+    broker.submit_order(buy(10, stop=95))
+    broker.submit_order(OrderRequest("AAA", Side.SELL, 10, order_type=OrderType.LIMIT, limit_price=110))
+    data.quotes["AAA"] = 94.0
+    assert broker.get_open_orders() == [] and broker.get_positions() == {}
+    assert broker.recent_events()[-1]["status"] == "canceled"
+
+
+def test_the_days_bar_is_only_judged_after_it_settles(env):
+    clock, data, broker, _ = env
+    hold_from_friday(clock, data, broker)
+    data.add_bar("AAA", MON, 99, 100, 95.3, 99)  # provisional bar right after the close
+    data.quotes["AAA"] = 99.0
+    clock.t = utc(2026, 10, 19, 20, 5)
+    assert "AAA" in broker.get_positions()
+    data.add_bar("AAA", MON, 99, 100, 94.6, 99)  # final bar: the low went through the stop
+    clock.t = utc(2026, 10, 19, 20, 30)
+    assert "AAA" not in broker.get_positions()
+
+
+def test_queued_market_order_expires_when_its_session_has_no_data(env):
+    clock, data, broker, _ = env
+    clock.t = utc(2026, 10, 17, 15)
+    broker.submit_order(buy(10))
+    clock.t = utc(2026, 10, 19, 21)  # Monday's session is over and AAA has no bar for it
+    data.quotes["AAA"] = 100.0
+    assert broker.get_open_orders() == []
+    assert broker.recent_events()[-1]["status"] == "expired"
+
+
+def test_a_fill_landing_between_the_routers_reads_cannot_bypass_position_limits(env):
+    """A queued order that fills while the router is reading state must not escape the risk check."""
+    clock, data, broker, _ = env
+
+    class LaggyData(FakeData):
+        calls, reveal_at = 0, 10**9
+
+        def get_bars(self, symbol, limit=200):
+            self.calls += 1
+            bars = super().get_bars(symbol, limit)
+            return bars if self.calls >= self.reveal_at else [b for b in bars if b.t.date() != MON]
+
+    laggy = LaggyData(clock)
+    laggy.bars, laggy.quotes = data.bars, {"AAA": 100.0}
+    broker.data = laggy
+    router = OrderRouter(broker, RiskManager(RiskLimits(), allowed_symbols=["AAA"]), Journal(":memory:"))
+    clock.t = utc(2026, 10, 16, 22)
+    assert router.route(buy(200, stop=90)).order.status == OrderStatus.PENDING
+
+    clock.t = utc(2026, 10, 19, 14, 1)
+    laggy.add_bar("AAA", MON, 100, 101, 99, 100)
+    laggy.calls, laggy.reveal_at = 0, 3  # Monday's bar shows up midway through the router's reads
+    second = router.route(buy(200, stop=90))
+    assert not second.decision.approved
+    assert broker.get_positions()["AAA"].qty == 200
